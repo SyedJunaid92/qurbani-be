@@ -4,16 +4,19 @@ import {
   ensureAllocationState,
   GLOBAL_ID
 } from '../models/AllocationState.js';
-import { computeAllocation } from './allocationService.js';
+import { computeAllocationFromCows } from './allocationService.js';
 
 const MAX_ATTEMPTS = 64;
 
 export const ALLOCATION_CONTENTION = 'ALLOCATION_CONTENTION';
 
+function cloneCows(cows) {
+  return (cows ?? []).map((c) => ({ cowNumber: c.cowNumber, filled: c.filled }));
+}
+
 /**
- * Persists a booking with consecutive share allocation.
- * Uses compare-and-swap on AllocationState so concurrent API calls cannot interleave shares
- * between users (safe across multiple Node processes / load-balanced instances).
+ * Persists a booking with allocation (whole chunks on one cow; partial cows keep trailing free slots).
+ * CAS on stateVersion + cows snapshot.
  */
 export async function persistBookingWithAllocation({ name, contact, shareNum }) {
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
@@ -26,17 +29,21 @@ export async function persistBookingWithAllocation({ name, contact, shareNum }) 
       throw new Error('Allocation state missing');
     }
 
-    const prevCow = state.currentCow;
-    const prevFilled = state.sharesFilledOnCurrentCow;
-    const { segments, assignments, nextCow, nextFilled } = computeAllocation(
-      prevCow,
-      prevFilled,
+    const prevVersion =
+      typeof state.stateVersion === 'number' ? state.stateVersion : 0;
+    const prevCows = cloneCows(state.cows);
+
+    const { segments, assignments, nextCows } = computeAllocationFromCows(
+      prevCows,
       shareNum
     );
 
     const cas = await AllocationState.updateOne(
-      { _id: GLOBAL_ID, currentCow: prevCow, sharesFilledOnCurrentCow: prevFilled },
-      { $set: { currentCow: nextCow, sharesFilledOnCurrentCow: nextFilled } }
+      { _id: GLOBAL_ID, stateVersion: prevVersion },
+      {
+        $set: { cows: nextCows },
+        $inc: { stateVersion: 1 }
+      }
     );
 
     if (cas.modifiedCount !== 1) {
@@ -53,8 +60,8 @@ export async function persistBookingWithAllocation({ name, contact, shareNum }) 
       });
     } catch (err) {
       await AllocationState.updateOne(
-        { _id: GLOBAL_ID, currentCow: nextCow, sharesFilledOnCurrentCow: nextFilled },
-        { $set: { currentCow: prevCow, sharesFilledOnCurrentCow: prevFilled } }
+        { _id: GLOBAL_ID, stateVersion: prevVersion + 1 },
+        { $set: { cows: prevCows, stateVersion: prevVersion } }
       );
       throw err;
     }

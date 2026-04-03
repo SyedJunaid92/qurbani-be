@@ -3,17 +3,29 @@ import { Booking } from './Booking.js';
 
 const GLOBAL_ID = 'global';
 
+const cowSlotSchema = new mongoose.Schema(
+  {
+    cowNumber: { type: Number, required: true, min: 1 },
+    filled: { type: Number, required: true, min: 0, max: 7 }
+  },
+  { _id: false }
+);
+
 const allocationStateSchema = new mongoose.Schema({
   _id: { type: String, default: GLOBAL_ID },
-  currentCow: { type: Number, default: 1, min: 1 },
-  sharesFilledOnCurrentCow: { type: Number, default: 0, min: 0, max: 6 },
-  /** 1 = first cow is cow #1; legacy DBs may be migrated from 0-based once */
-  cowNumberingBase: { type: Number, default: 1, min: 1 }
+  cows: { type: [cowSlotSchema], default: [] },
+  stateVersion: { type: Number, default: 0, min: 0 },
+  cowNumberingBase: { type: Number, default: 1, min: 1 },
+  /** Legacy fields (removed after migrateLinearStateToCows) */
+  currentCow: { type: Number, required: false, min: 1 },
+  sharesFilledOnCurrentCow: { type: Number, required: false, min: 0, max: 6 }
 });
 
-allocationStateSchema.pre('save', function validateFilled(next) {
-  if (this.sharesFilledOnCurrentCow > 6) {
-    return next(new Error('Invalid state: sharesFilledOnCurrentCow must be 0–6'));
+allocationStateSchema.pre('save', function validateCows(next) {
+  for (const c of this.cows ?? []) {
+    if (c.filled > 7) {
+      return next(new Error('Invalid state: cow filled must be 0–7'));
+    }
   }
   next();
 });
@@ -26,8 +38,8 @@ export async function ensureAllocationState() {
     { _id: GLOBAL_ID },
     {
       $setOnInsert: {
-        currentCow: 1,
-        sharesFilledOnCurrentCow: 0,
+        cows: [],
+        stateVersion: 0,
         cowNumberingBase: 1
       }
     },
@@ -39,14 +51,53 @@ export async function ensureAllocationState() {
     try {
       await AllocationState.create({
         _id: GLOBAL_ID,
-        currentCow: 1,
-        sharesFilledOnCurrentCow: 0,
+        cows: [],
+        stateVersion: 0,
         cowNumberingBase: 1
       });
     } catch (e) {
       if (e?.code !== 11000) throw e;
     }
   }
+}
+
+/** Convert old single-pointer state to per-cow filled counts */
+export async function migrateLinearStateToCows() {
+  const raw = await AllocationState.findById(GLOBAL_ID).lean();
+  if (!raw) return;
+
+  const hasLegacy =
+    raw.currentCow !== undefined || raw.sharesFilledOnCurrentCow !== undefined;
+  if (!hasLegacy) return;
+
+  if (Array.isArray(raw.cows) && raw.cows.length > 0) {
+    await AllocationState.updateOne(
+      { _id: GLOBAL_ID },
+      { $unset: { currentCow: '', sharesFilledOnCurrentCow: '' } }
+    );
+    return;
+  }
+
+  const cc = raw.currentCow ?? 1;
+  const sf = raw.sharesFilledOnCurrentCow ?? 0;
+  const cows = [];
+  if (cc > 1) {
+    for (let i = 1; i < cc; i += 1) {
+      cows.push({ cowNumber: i, filled: 7 });
+    }
+  }
+  cows.push({ cowNumber: cc, filled: sf });
+
+  await AllocationState.updateOne(
+    { _id: GLOBAL_ID },
+    {
+      $set: {
+        cows,
+        stateVersion: typeof raw.stateVersion === 'number' ? raw.stateVersion : 0
+      },
+      $unset: { currentCow: '', sharesFilledOnCurrentCow: '' }
+    }
+  );
 }
 
 /** One-time shift from 0-based cows to 1-based when legacy data is detected */
@@ -57,7 +108,10 @@ export async function migrateCowNumberingIfLegacy() {
   const hasCowZeroBooking = await Booking.exists({
     $or: [{ 'allocations.cowNumber': 0 }, { 'cowShareAssignments.cowNumber': 0 }]
   });
-  const stateAtZero = state.currentCow === 0;
+
+  const stateAtZero =
+    state.currentCow === 0 ||
+    (Array.isArray(state.cows) && state.cows.some((c) => c.cowNumber === 0));
 
   if (!hasCowZeroBooking && !stateAtZero) {
     state.cowNumberingBase = 1;
@@ -65,7 +119,7 @@ export async function migrateCowNumberingIfLegacy() {
     return;
   }
 
-  if (!hasCowZeroBooking && stateAtZero) {
+  if (!hasCowZeroBooking && stateAtZero && state.currentCow === 0 && !state.cows?.length) {
     state.currentCow = 1;
     state.cowNumberingBase = 1;
     await state.save();
@@ -85,7 +139,14 @@ export async function migrateCowNumberingIfLegacy() {
     }
   }
 
-  state.currentCow = state.currentCow + 1;
+  if (Array.isArray(state.cows) && state.cows.length > 0) {
+    for (const c of state.cows) {
+      if (typeof c.cowNumber === 'number') c.cowNumber += 1;
+    }
+  } else if (state.currentCow != null) {
+    state.currentCow = state.currentCow + 1;
+  }
+
   state.cowNumberingBase = 1;
   await state.save();
 }

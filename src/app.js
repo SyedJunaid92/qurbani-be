@@ -3,7 +3,8 @@ import express from 'express';
 import { connectDB } from './db/connect.js';
 import {
   ensureAllocationState,
-  migrateCowNumberingIfLegacy
+  migrateCowNumberingIfLegacy,
+  migrateLinearStateToCows
 } from './models/AllocationState.js';
 import { bookingsRouter } from './routes/bookings.js';
 
@@ -17,6 +18,7 @@ function ensureInitialized() {
       await connectDB();
       await ensureAllocationState();
       await migrateCowNumberingIfLegacy();
+      await migrateLinearStateToCows();
     })();
   }
   return initPromise;
