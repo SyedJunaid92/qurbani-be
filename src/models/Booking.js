@@ -33,6 +33,11 @@ const bookingSchema = new mongoose.Schema(
     name: { type: String, required: true, trim: true },
     contact: { type: String, required: true, trim: true },
     shares: { type: Number, required: true, min: 1 },
+    created_by: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      required: true
+    },
     /** One row per cow segment: range + explicit share indices on that cow */
     allocations: { type: [allocationSegmentSchema], default: [] },
     /** Flat list: every (cow, share) pair for this booking, in order */

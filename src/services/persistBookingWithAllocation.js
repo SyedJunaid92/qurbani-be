@@ -18,7 +18,7 @@ function cloneCows(cows) {
  * Persists a booking with allocation (whole chunks on one cow; partial cows keep trailing free slots).
  * CAS on stateVersion + cows snapshot.
  */
-export async function persistBookingWithAllocation({ name, contact, shareNum }) {
+export async function persistBookingWithAllocation({ name, contact, shareNum, createdBy }) {
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
     let state = await AllocationState.findById(GLOBAL_ID).lean();
     if (!state) {
@@ -55,6 +55,7 @@ export async function persistBookingWithAllocation({ name, contact, shareNum }) 
         name,
         contact,
         shares: shareNum,
+        created_by: createdBy,
         allocations: segments,
         cowShareAssignments: assignments
       });

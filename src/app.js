@@ -1,12 +1,16 @@
 import cors from 'cors';
 import express from 'express';
 import { connectDB } from './db/connect.js';
+import { authenticate } from './middleware/auth.js';
 import {
   ensureAllocationState,
   migrateCowNumberingIfLegacy,
   migrateLinearStateToCows
 } from './models/AllocationState.js';
+import { adminRouter } from './routes/admin.js';
+import { authRouter } from './routes/auth.js';
 import { bookingsRouter } from './routes/bookings.js';
+import { ensureInitialAdmin } from './seed/ensureInitialAdmin.js';
 
 const CORS_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:5173';
 
@@ -16,9 +20,13 @@ function ensureInitialized() {
   if (!initPromise) {
     initPromise = (async () => {
       await connectDB();
+      if (!process.env.JWT_SECRET) {
+        throw new Error('JWT_SECRET environment variable is required');
+      }
       await ensureAllocationState();
       await migrateCowNumberingIfLegacy();
       await migrateLinearStateToCows();
+      await ensureInitialAdmin();
     })();
   }
   return initPromise;
@@ -38,7 +46,9 @@ app.use(async (req, res, next) => {
   }
 });
 
-app.use('/api/bookings', bookingsRouter);
+app.use('/api/auth', authRouter);
+app.use('/api/admin', adminRouter);
+app.use('/api/bookings', authenticate, bookingsRouter);
 
 app.use((err, _req, res, _next) => {
   console.error(err);
