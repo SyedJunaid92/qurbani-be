@@ -57,7 +57,14 @@ export async function persistBookingWithAllocation({ name, contact, shareNum, cr
         shares: shareNum,
         created_by: createdBy,
         allocations: segments,
-        cowShareAssignments: assignments
+        cowShareAssignments: assignments,
+        shareParticipantDetails: assignments.map((a) => ({
+          cowNumber: a.cowNumber,
+          shareNumber: a.shareNumber,
+          name: '',
+          contact: '',
+          address: ''
+        }))
       });
     } catch (err) {
       await AllocationState.updateOne(

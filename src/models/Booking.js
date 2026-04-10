@@ -28,6 +28,17 @@ const cowShareAssignmentSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const shareParticipantDetailSchema = new mongoose.Schema(
+  {
+    cowNumber: { type: Number, required: true, min: 1 },
+    shareNumber: { type: Number, required: true, min: 1, max: 7 },
+    name: { type: String, default: '', trim: true },
+    contact: { type: String, default: '', trim: true },
+    address: { type: String, default: '', trim: true }
+  },
+  { _id: false }
+);
+
 const bookingSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, trim: true },
@@ -41,7 +52,9 @@ const bookingSchema = new mongoose.Schema(
     /** One row per cow segment: range + explicit share indices on that cow */
     allocations: { type: [allocationSegmentSchema], default: [] },
     /** Flat list: every (cow, share) pair for this booking, in order */
-    cowShareAssignments: { type: [cowShareAssignmentSchema], default: [] }
+    cowShareAssignments: { type: [cowShareAssignmentSchema], default: [] },
+    /** One row per share slot (same order as cowShareAssignments): participant details */
+    shareParticipantDetails: { type: [shareParticipantDetailSchema], default: [] }
   },
   {
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }
@@ -73,6 +86,19 @@ bookingSchema.pre('validate', function bookingAllocationConsistency(next) {
     if (s.fromShare !== s.shareNumbers[0] || s.toShare !== s.shareNumbers[s.shareNumbers.length - 1]) {
       this.invalidate('allocations', 'shareNumbers must match fromShare through toShare');
       return next();
+    }
+  }
+  const det = this.shareParticipantDetails;
+  if (Array.isArray(det) && det.length > 0) {
+    if (det.length !== flat.length) {
+      this.invalidate('shareParticipantDetails', 'must have one entry per share slot');
+      return next();
+    }
+    for (let i = 0; i < flat.length; i += 1) {
+      if (det[i].cowNumber !== flat[i].cowNumber || det[i].shareNumber !== flat[i].shareNumber) {
+        this.invalidate('shareParticipantDetails', 'entries must align with cowShareAssignments order');
+        return next();
+      }
     }
   }
   next();
