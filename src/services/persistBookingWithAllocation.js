@@ -4,6 +4,12 @@ import {
   ensureAllocationState,
   GLOBAL_ID
 } from '../models/AllocationState.js';
+import {
+  buildFullOccupancyMap,
+  cowsArrayFromOccupancyMap,
+  denseCowsFromOccupancyMap,
+  mergeOccupancy
+} from './allocationEditService.js';
 import { computeAllocationFromCows } from './allocationService.js';
 
 const MAX_ATTEMPTS = 64;
@@ -33,15 +39,19 @@ export async function persistBookingWithAllocation({ name, contact, shareNum, cr
       typeof state.stateVersion === 'number' ? state.stateVersion : 0;
     const prevCows = cloneCows(state.cows);
 
-    const { segments, assignments, nextCows } = computeAllocationFromCows(
-      prevCows,
-      shareNum
-    );
+    const existingBookings = await Booking.find({})
+      .select('cowShareAssignments')
+      .lean();
+    const occ = buildFullOccupancyMap(existingBookings);
+    const dense = denseCowsFromOccupancyMap(occ);
+    const { segments, assignments } = computeAllocationFromCows(dense, shareNum);
+    const mergedOcc = mergeOccupancy(occ, assignments);
+    const sparseCows = cowsArrayFromOccupancyMap(mergedOcc);
 
     const cas = await AllocationState.updateOne(
       { _id: GLOBAL_ID, stateVersion: prevVersion },
       {
-        $set: { cows: nextCows },
+        $set: { cows: sparseCows },
         $inc: { stateVersion: 1 }
       }
     );

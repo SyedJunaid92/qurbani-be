@@ -4,6 +4,17 @@ import {
   ALLOCATION_CONTENTION,
   persistBookingWithAllocation
 } from '../services/persistBookingWithAllocation.js';
+import {
+  adjustBookingShareCount,
+  allocationOptionsPayload,
+  buildOccupancyMapExcludingBooking,
+  mergeOccupancy,
+  normalizeAssignmentsToConsecutivePerCow,
+  segmentsFromOrderedAssignments,
+  syncAllocationStateFromAllBookings,
+  validatePrefixOccupancy,
+  validateProposedAgainstOthers
+} from '../services/allocationEditService.js';
 import { isValidPhone } from '../utils/phone.js';
 
 function bookingFilter(req) {
@@ -102,6 +113,197 @@ export async function updateShareParticipantDetails(req, res) {
   await booking.save();
   const populated = await Booking.findById(id).populate('created_by', 'name email').lean();
   res.json(populated);
+}
+
+export async function getAllocationOptions(req, res) {
+  const { id } = req.params;
+  if (!mongoose.isValidObjectId(id)) {
+    return res.status(400).json({ error: 'Invalid booking id' });
+  }
+  const booking = await Booking.findById(id).lean();
+  if (!booking) {
+    return res.status(404).json({ error: 'Booking not found' });
+  }
+  if (!bookingOwnerMatches(req, booking)) {
+    return res.status(403).json({ error: 'You do not have access to this booking' });
+  }
+  const all = await Booking.find({}).select('cowShareAssignments').lean();
+  const otherMap = buildOccupancyMapExcludingBooking(all, id);
+  const payload = allocationOptionsPayload(
+    otherMap,
+    booking.cowShareAssignments || []
+  );
+  res.json({
+    shares: booking.shares,
+    ...payload
+  });
+}
+
+export async function updateAllocationAndShareDetails(req, res) {
+  const { id } = req.params;
+  if (!mongoose.isValidObjectId(id)) {
+    return res.status(400).json({ error: 'Invalid booking id' });
+  }
+  const { cowShareAssignments, shareParticipantDetails } = req.body ?? {};
+  if (!Array.isArray(cowShareAssignments) || !Array.isArray(shareParticipantDetails)) {
+    return res.status(400).json({
+      error: 'cowShareAssignments and shareParticipantDetails must be arrays'
+    });
+  }
+
+  const booking = await Booking.findById(id);
+  if (!booking) {
+    return res.status(404).json({ error: 'Booking not found' });
+  }
+  if (!bookingOwnerMatches(req, booking)) {
+    return res.status(403).json({ error: 'You do not have access to this booking' });
+  }
+
+  const expected = booking.shares;
+  if (cowShareAssignments.length !== expected || shareParticipantDetails.length !== expected) {
+    return res.status(400).json({
+      error: `Expected ${expected} share row(s) for cowShareAssignments and shareParticipantDetails`
+    });
+  }
+
+  const proposedRaw = cowShareAssignments.map((a) => ({
+    cowNumber: Number(a.cowNumber),
+    shareNumber: Number(a.shareNumber)
+  }));
+
+  const all = await Booking.find({}).select('cowShareAssignments').lean();
+  const otherMap = buildOccupancyMapExcludingBooking(all, id);
+  const norm = normalizeAssignmentsToConsecutivePerCow(otherMap, proposedRaw);
+  if (!norm.ok) {
+    return res.status(400).json({ error: norm.message });
+  }
+  const proposed = norm.assignments;
+
+  const vOther = validateProposedAgainstOthers(proposed, otherMap);
+  if (!vOther.ok) {
+    return res.status(400).json({ error: vOther.message });
+  }
+
+  const merged = mergeOccupancy(otherMap, proposed);
+  const vPrefix = validatePrefixOccupancy(merged);
+  if (!vPrefix.ok) {
+    return res.status(400).json({ error: vPrefix.message });
+  }
+
+  for (let i = 0; i < expected; i += 1) {
+    const d = shareParticipantDetails[i];
+    if (!d || typeof d !== 'object') {
+      return res.status(400).json({
+        error: `shareParticipantDetails row ${i + 1} is missing`
+      });
+    }
+    const c = typeof d.contact === 'string' ? d.contact.trim() : '';
+    if (c && !isValidPhone(c)) {
+      return res.status(400).json({
+        error: `Invalid phone on share row ${i + 1}`
+      });
+    }
+  }
+
+  const segments = segmentsFromOrderedAssignments(proposed);
+  const sumSeg = segments.reduce((acc, s) => acc + s.shareCount, 0);
+  if (sumSeg !== expected) {
+    return res.status(400).json({ error: 'Allocation segments do not match share count' });
+  }
+
+  booking.cowShareAssignments = proposed;
+  booking.allocations = segments;
+  booking.shareParticipantDetails = proposed.map((a, i) => {
+    const d = shareParticipantDetails[i];
+    return {
+      cowNumber: a.cowNumber,
+      shareNumber: a.shareNumber,
+      name: typeof d.name === 'string' ? d.name.trim() : '',
+      contact: typeof d.contact === 'string' ? d.contact.trim() : '',
+      address: typeof d.address === 'string' ? d.address.trim() : ''
+    };
+  });
+
+  try {
+    await booking.save();
+    await syncAllocationStateFromAllBookings();
+  } catch (e) {
+    console.error(e);
+    if (e?.code === 'INVALID_GLOBAL_OCCUPANCY' || e?.code === 'ALLOCATION_SYNC_CONTENTION') {
+      return res.status(503).json({ error: e.message });
+    }
+    return res.status(500).json({ error: 'Could not save allocation' });
+  }
+
+  const populated = await Booking.findById(id).populate('created_by', 'name email').lean();
+  res.json(populated);
+}
+
+export async function patchBooking(req, res) {
+  const { id } = req.params;
+  if (!mongoose.isValidObjectId(id)) {
+    return res.status(400).json({ error: 'Invalid booking id' });
+  }
+  const { shares } = req.body ?? {};
+  if (shares === undefined) {
+    return res.status(400).json({ error: 'Provide shares (total share count)' });
+  }
+  const newShares = Number(shares);
+
+  const booking = await Booking.findById(id);
+  if (!booking) {
+    return res.status(404).json({ error: 'Booking not found' });
+  }
+  if (!bookingOwnerMatches(req, booking)) {
+    return res.status(403).json({ error: 'You do not have access to this booking' });
+  }
+
+  const all = await Booking.find({}).select('cowShareAssignments shares').lean();
+  const result = adjustBookingShareCount(booking, newShares, all, id);
+  if (!result.ok) {
+    return res.status(400).json({ error: result.message });
+  }
+  if (!result.changed) {
+    const populated = await Booking.findById(id).populate('created_by', 'name email').lean();
+    return res.json(populated);
+  }
+
+  try {
+    await booking.save();
+    await syncAllocationStateFromAllBookings();
+  } catch (e) {
+    console.error(e);
+    if (e?.code === 'INVALID_GLOBAL_OCCUPANCY' || e?.code === 'ALLOCATION_SYNC_CONTENTION') {
+      return res.status(503).json({ error: e.message });
+    }
+    return res.status(500).json({ error: 'Could not update share count' });
+  }
+
+  const populated = await Booking.findById(id).populate('created_by', 'name email').lean();
+  res.json(populated);
+}
+
+export async function deleteBooking(req, res) {
+  const { id } = req.params;
+  if (!mongoose.isValidObjectId(id)) {
+    return res.status(400).json({ error: 'Invalid booking id' });
+  }
+  const existing = await Booking.findById(id).lean();
+  if (!existing) {
+    return res.status(404).json({ error: 'Booking not found' });
+  }
+  if (!bookingOwnerMatches(req, existing)) {
+    return res.status(403).json({ error: 'You do not have access to this booking' });
+  }
+
+  await Booking.deleteOne({ _id: id });
+  try {
+    await syncAllocationStateFromAllBookings();
+  } catch (e) {
+    console.error(e);
+    return res.status(503).json({ error: e.message || 'Could not sync allocation after delete' });
+  }
+  res.status(204).send();
 }
 
 export async function createBooking(req, res) {
