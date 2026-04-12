@@ -34,7 +34,8 @@ const shareParticipantDetailSchema = new mongoose.Schema(
     shareNumber: { type: Number, required: true, min: 1, max: 7 },
     name: { type: String, default: '', trim: true },
     contact: { type: String, default: '', trim: true },
-    address: { type: String, default: '', trim: true }
+    address: { type: String, default: '', trim: true },
+    paymentReceived: { type: Boolean, default: false }
   },
   { _id: false }
 );

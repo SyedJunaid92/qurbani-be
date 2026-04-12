@@ -73,7 +73,8 @@ export async function persistBookingWithAllocation({ name, contact, shareNum, cr
           shareNumber: a.shareNumber,
           name: '',
           contact: '',
-          address: ''
+          address: '',
+          paymentReceived: false
         }))
       });
     } catch (err) {

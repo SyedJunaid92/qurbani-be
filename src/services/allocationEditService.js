@@ -296,7 +296,8 @@ export function adjustBookingShareCount(booking, newShares, allBookingsLean, boo
         shareNumber: a.shareNumber,
         name: typeof d?.name === 'string' ? d.name.trim() : '',
         contact: typeof d?.contact === 'string' ? d.contact.trim() : '',
-        address: typeof d?.address === 'string' ? d.address.trim() : ''
+        address: typeof d?.address === 'string' ? d.address.trim() : '',
+        paymentReceived: d?.paymentReceived === true
       };
     });
     return { ok: true, changed: true };
@@ -330,7 +331,8 @@ export function adjustBookingShareCount(booking, newShares, allBookingsLean, boo
         shareNumber: a.shareNumber,
         name: typeof d?.name === 'string' ? d.name.trim() : '',
         contact: typeof d?.contact === 'string' ? d.contact.trim() : '',
-        address: typeof d?.address === 'string' ? d.address.trim() : ''
+        address: typeof d?.address === 'string' ? d.address.trim() : '',
+        paymentReceived: d?.paymentReceived === true
       };
     }
     return {
@@ -338,7 +340,8 @@ export function adjustBookingShareCount(booking, newShares, allBookingsLean, boo
       shareNumber: a.shareNumber,
       name: '',
       contact: '',
-      address: ''
+      address: '',
+      paymentReceived: false
     };
   });
 

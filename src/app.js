@@ -7,6 +7,7 @@ import {
   migrateCowNumberingIfLegacy,
   migrateLinearStateToCows
 } from './models/AllocationState.js';
+import { updateSharePayment } from './controllers/bookingsController.js';
 import { adminRouter } from './routes/admin.js';
 import { authRouter } from './routes/auth.js';
 import { bookingsRouter } from './routes/bookings.js';
@@ -48,6 +49,8 @@ app.use(async (req, res, next) => {
 
 app.use('/api/auth', authRouter);
 app.use('/api/admin', adminRouter);
+/* Register before bookings router so nested path always matches (PATCH /:id/share-payment). */
+app.patch('/api/bookings/:id/share-payment', authenticate, updateSharePayment);
 app.use('/api/bookings', authenticate, bookingsRouter);
 
 app.use((err, _req, res, _next) => {

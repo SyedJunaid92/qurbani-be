@@ -21,6 +21,28 @@ function bookingFilter(req) {
   return req.user.role === 'admin' ? {} : { created_by: req.user.id };
 }
 
+/** @param {{ shares?: number, cowShareAssignments?: unknown[], shareParticipantDetails?: { paymentReceived?: boolean }[] }} booking */
+function computePaymentStatus(booking) {
+  const n =
+    typeof booking.shares === 'number'
+      ? booking.shares
+      : booking.cowShareAssignments?.length ?? 0;
+  if (n < 1) return 'pending';
+  const details = booking.shareParticipantDetails || [];
+  let paid = 0;
+  for (let i = 0; i < n; i += 1) {
+    if (details[i]?.paymentReceived === true) paid += 1;
+  }
+  if (paid === n) return 'paid';
+  if (paid === 0) return 'pending';
+  if (n === 1) return 'pending';
+  return 'partial';
+}
+
+function enrichBookingWithPaymentStatus(b) {
+  return { ...b, paymentStatus: computePaymentStatus(b) };
+}
+
 function bookingOwnerMatches(req, bookingDocOrLean) {
   if (req.user.role === 'admin') return true;
   const created = bookingDocOrLean.created_by;
@@ -45,6 +67,74 @@ function parseCowsQuery(cowsParam) {
   ];
 }
 
+const PAYMENT_STATUS_ALL = new Set(['pending', 'partial', 'paid']);
+
+function parsePaymentsQuery(query) {
+  const raw = query.payments ?? query.payment;
+  if (raw == null || raw === '') return [];
+  const parts = Array.isArray(raw)
+    ? raw.flatMap((x) => String(x).split(','))
+    : String(raw).split(',');
+  return [
+    ...new Set(
+      parts
+        .map((s) => String(s).trim().toLowerCase())
+        .filter((s) => PAYMENT_STATUS_ALL.has(s))
+    )
+  ];
+}
+
+/**
+ * Mongo match for list filter; aligns with computePaymentStatus().
+ * @param {string[]} statuses — subset of pending, partial, paid
+ * @returns {object | null} — merge with $and, or null if no filter
+ */
+function buildPaymentStatusQuery(statuses) {
+  const set = new Set(statuses.filter((s) => PAYMENT_STATUS_ALL.has(s)));
+  if (set.size === 0 || set.size === PAYMENT_STATUS_ALL.size) return null;
+
+  const sliceDetails = {
+    $slice: [{ $ifNull: ['$shareParticipantDetails', []] }, '$shares']
+  };
+  const paidCountExpr = {
+    $size: {
+      $filter: {
+        input: sliceDetails,
+        as: 'd',
+        cond: { $eq: ['$$d.paymentReceived', true] }
+      }
+    }
+  };
+
+  const branches = [];
+  if (set.has('paid')) {
+    branches.push({
+      $expr: {
+        $and: [{ $gte: ['$shares', 1] }, { $eq: [paidCountExpr, '$shares'] }]
+      }
+    });
+  }
+  if (set.has('pending')) {
+    branches.push({
+      $expr: { $eq: [paidCountExpr, 0] }
+    });
+  }
+  if (set.has('partial')) {
+    branches.push({
+      $expr: {
+        $and: [
+          { $gt: ['$shares', 1] },
+          { $gt: [paidCountExpr, 0] },
+          { $lt: [paidCountExpr, '$shares'] }
+        ]
+      }
+    });
+  }
+  if (branches.length === 0) return null;
+  if (branches.length === 1) return branches[0];
+  return { $or: branches };
+}
+
 export async function listDistinctCowNumbers(req, res) {
   const filter = bookingFilter(req);
   const raw = await Booking.distinct('cowShareAssignments.cowNumber', filter);
@@ -61,7 +151,7 @@ export async function listBookings(req, res) {
   const pageRaw = parseInt(String(req.query.page ?? ''), 10);
   const pageRequested = Number.isInteger(pageRaw) && pageRaw >= 1 ? pageRaw : 1;
 
-  const filter = { ...bookingFilter(req) };
+  let filter = { ...bookingFilter(req) };
 
   const nameQ = typeof req.query.name === 'string' ? req.query.name.trim() : '';
   if (nameQ) {
@@ -78,6 +168,12 @@ export async function listBookings(req, res) {
     filter['cowShareAssignments.cowNumber'] = { $in: cows };
   }
 
+  const paymentStatuses = parsePaymentsQuery(req.query);
+  const paymentQ = buildPaymentStatusQuery(paymentStatuses);
+  if (paymentQ) {
+    filter = { $and: [filter, paymentQ] };
+  }
+
   const total = await Booking.countDocuments(filter);
   const totalPages = total === 0 ? 1 : Math.ceil(total / limit);
   const page = Math.min(Math.max(1, pageRequested), totalPages);
@@ -91,7 +187,7 @@ export async function listBookings(req, res) {
     .lean();
 
   res.json({
-    data: bookings,
+    data: bookings.map(enrichBookingWithPaymentStatus),
     page,
     limit,
     total,
@@ -111,7 +207,41 @@ export async function getBookingById(req, res) {
   if (!bookingOwnerMatches(req, booking)) {
     return res.status(403).json({ error: 'You do not have access to this booking' });
   }
-  res.json(booking);
+  res.json(enrichBookingWithPaymentStatus(booking));
+}
+
+export async function updateSharePayment(req, res) {
+  const { id } = req.params;
+  if (!mongoose.isValidObjectId(id)) {
+    return res.status(400).json({ error: 'Invalid booking id' });
+  }
+  const { index, paymentReceived } = req.body ?? {};
+  const idx = Number(index);
+  if (!Number.isInteger(idx) || idx < 0) {
+    return res.status(400).json({ error: 'index must be a non-negative integer (share row)' });
+  }
+  if (typeof paymentReceived !== 'boolean') {
+    return res.status(400).json({ error: 'paymentReceived must be a boolean' });
+  }
+
+  const booking = await Booking.findById(id);
+  if (!booking) {
+    return res.status(404).json({ error: 'Booking not found' });
+  }
+  if (!bookingOwnerMatches(req, booking)) {
+    return res.status(403).json({ error: 'You do not have access to this booking' });
+  }
+
+  const det = booking.shareParticipantDetails || [];
+  if (idx >= det.length) {
+    return res.status(400).json({ error: 'Invalid share index' });
+  }
+
+  det[idx].paymentReceived = paymentReceived;
+  booking.markModified('shareParticipantDetails');
+  await booking.save();
+  const populated = await Booking.findById(id).populate('created_by', 'name email').lean();
+  res.json(enrichBookingWithPaymentStatus(populated));
 }
 
 export async function updateShareParticipantDetails(req, res) {
@@ -162,20 +292,23 @@ export async function updateShareParticipantDetails(req, res) {
     }
   }
 
+  const prevDetails = booking.shareParticipantDetails || [];
   booking.shareParticipantDetails = assignments.map((a, i) => {
     const d = shareParticipantDetails[i];
+    const prev = prevDetails[i];
     return {
       cowNumber: a.cowNumber,
       shareNumber: a.shareNumber,
       name: typeof d.name === 'string' ? d.name.trim() : '',
       contact: typeof d.contact === 'string' ? d.contact.trim() : '',
-      address: typeof d.address === 'string' ? d.address.trim() : ''
+      address: typeof d.address === 'string' ? d.address.trim() : '',
+      paymentReceived: prev?.paymentReceived === true
     };
   });
 
   await booking.save();
   const populated = await Booking.findById(id).populate('created_by', 'name email').lean();
-  res.json(populated);
+  res.json(enrichBookingWithPaymentStatus(populated));
 }
 
 export async function getAllocationOptions(req, res) {
@@ -274,16 +407,31 @@ export async function updateAllocationAndShareDetails(req, res) {
     return res.status(400).json({ error: 'Allocation segments do not match share count' });
   }
 
+  const prevDetails = booking.shareParticipantDetails || [];
+  const prevPayBySlot = new Map();
+  for (const row of prevDetails) {
+    if (row?.cowNumber != null && row?.shareNumber != null) {
+      prevPayBySlot.set(`${row.cowNumber}:${row.shareNumber}`, row.paymentReceived === true);
+    }
+  }
+
   booking.cowShareAssignments = proposed;
   booking.allocations = segments;
   booking.shareParticipantDetails = proposed.map((a, i) => {
     const d = shareParticipantDetails[i];
+    const key = `${a.cowNumber}:${a.shareNumber}`;
+    const fromBody =
+      d && typeof d.paymentReceived === 'boolean' ? d.paymentReceived : undefined;
+    const fromPrevSlot = prevPayBySlot.get(key);
+    const paymentReceived =
+      fromBody !== undefined ? fromBody : fromPrevSlot === true ? true : false;
     return {
       cowNumber: a.cowNumber,
       shareNumber: a.shareNumber,
       name: typeof d.name === 'string' ? d.name.trim() : '',
       contact: typeof d.contact === 'string' ? d.contact.trim() : '',
-      address: typeof d.address === 'string' ? d.address.trim() : ''
+      address: typeof d.address === 'string' ? d.address.trim() : '',
+      paymentReceived
     };
   });
 
@@ -299,7 +447,7 @@ export async function updateAllocationAndShareDetails(req, res) {
   }
 
   const populated = await Booking.findById(id).populate('created_by', 'name email').lean();
-  res.json(populated);
+  res.json(enrichBookingWithPaymentStatus(populated));
 }
 
 export async function patchBooking(req, res) {
@@ -328,7 +476,7 @@ export async function patchBooking(req, res) {
   }
   if (!result.changed) {
     const populated = await Booking.findById(id).populate('created_by', 'name email').lean();
-    return res.json(populated);
+    return res.json(enrichBookingWithPaymentStatus(populated));
   }
 
   try {
@@ -343,7 +491,7 @@ export async function patchBooking(req, res) {
   }
 
   const populated = await Booking.findById(id).populate('created_by', 'name email').lean();
-  res.json(populated);
+  res.json(enrichBookingWithPaymentStatus(populated));
 }
 
 export async function deleteBooking(req, res) {
@@ -393,7 +541,7 @@ export async function createBooking(req, res) {
     const populated = await Booking.findById(created._id)
       .populate('created_by', 'name email')
       .lean();
-    res.status(201).json(populated);
+    res.status(201).json(enrichBookingWithPaymentStatus(populated));
   } catch (e) {
     console.error(e);
     if (e?.code === ALLOCATION_CONTENTION) {
