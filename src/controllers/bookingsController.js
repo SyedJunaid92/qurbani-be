@@ -28,12 +28,75 @@ function bookingOwnerMatches(req, bookingDocOrLean) {
   return oid === req.user.id;
 }
 
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function parseCowsQuery(cowsParam) {
+  if (cowsParam == null || cowsParam === '') return [];
+  const raw = Array.isArray(cowsParam) ? cowsParam.join(',') : String(cowsParam);
+  return [
+    ...new Set(
+      raw
+        .split(',')
+        .map((x) => parseInt(String(x).trim(), 10))
+        .filter((n) => Number.isInteger(n) && n >= 1)
+    )
+  ];
+}
+
+export async function listDistinctCowNumbers(req, res) {
+  const filter = bookingFilter(req);
+  const raw = await Booking.distinct('cowShareAssignments.cowNumber', filter);
+  const nums = [
+    ...new Set(raw.map((x) => Number(x)).filter((n) => Number.isInteger(n) && n >= 1))
+  ].sort((a, b) => a - b);
+  res.json(nums);
+}
+
 export async function listBookings(req, res) {
-  const bookings = await Booking.find(bookingFilter(req))
+  const allowedLimits = [10, 20, 30, 50];
+  const limitRaw = parseInt(String(req.query.limit ?? ''), 10);
+  const limit = allowedLimits.includes(limitRaw) ? limitRaw : 10;
+  const pageRaw = parseInt(String(req.query.page ?? ''), 10);
+  const pageRequested = Number.isInteger(pageRaw) && pageRaw >= 1 ? pageRaw : 1;
+
+  const filter = { ...bookingFilter(req) };
+
+  const nameQ = typeof req.query.name === 'string' ? req.query.name.trim() : '';
+  if (nameQ) {
+    filter.name = { $regex: escapeRegex(nameQ), $options: 'i' };
+  }
+
+  const contactQ = typeof req.query.contact === 'string' ? req.query.contact.trim() : '';
+  if (contactQ) {
+    filter.contact = { $regex: escapeRegex(contactQ), $options: 'i' };
+  }
+
+  const cows = parseCowsQuery(req.query.cows);
+  if (cows.length > 0) {
+    filter['cowShareAssignments.cowNumber'] = { $in: cows };
+  }
+
+  const total = await Booking.countDocuments(filter);
+  const totalPages = total === 0 ? 1 : Math.ceil(total / limit);
+  const page = Math.min(Math.max(1, pageRequested), totalPages);
+  const skip = (page - 1) * limit;
+
+  const bookings = await Booking.find(filter)
     .populate('created_by', 'name email')
     .sort({ created_at: -1 })
+    .skip(skip)
+    .limit(limit)
     .lean();
-  res.json(bookings);
+
+  res.json({
+    data: bookings,
+    page,
+    limit,
+    total,
+    totalPages
+  });
 }
 
 export async function getBookingById(req, res) {

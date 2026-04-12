@@ -5,6 +5,7 @@ import {
   getAllocationOptions,
   getBookingById,
   listBookings,
+  listDistinctCowNumbers,
   patchBooking,
   updateAllocationAndShareDetails,
   updateShareParticipantDetails
@@ -12,6 +13,7 @@ import {
 
 export const bookingsRouter = Router();
 
+bookingsRouter.get('/cow-numbers', listDistinctCowNumbers);
 bookingsRouter.get('/', listBookings);
 bookingsRouter.post('/', createBooking);
 bookingsRouter.get('/:id/allocation-options', getAllocationOptions);
