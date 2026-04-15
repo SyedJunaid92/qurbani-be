@@ -2,6 +2,7 @@ import { Router } from 'express';
 import {
   createBooking,
   deleteBooking,
+  exportData,
   getAllocationOptions,
   getBookingById,
   listBookings,
@@ -14,6 +15,7 @@ import {
 export const bookingsRouter = Router();
 
 bookingsRouter.get('/cow-numbers', listDistinctCowNumbers);
+bookingsRouter.get('/export-data', exportData);
 bookingsRouter.get('/', listBookings);
 bookingsRouter.post('/', createBooking);
 bookingsRouter.get('/:id/allocation-options', getAllocationOptions);

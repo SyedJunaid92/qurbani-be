@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import * as XLSX from 'xlsx';
 import { Booking } from '../models/Booking.js';
 import {
   ALLOCATION_CONTENTION,
@@ -515,6 +516,196 @@ export async function deleteBooking(req, res) {
     return res.status(503).json({ error: e.message || 'Could not sync allocation after delete' });
   }
   res.status(204).send();
+}
+
+function aggregateAnimalData(allBookings) {
+  const allocated = new Set();
+  const cowMap = {};
+  for (const booking of allBookings) {
+    for (const a of booking.cowShareAssignments || []) {
+      if (a.cowNumber >= 1 && a.shareNumber >= 1 && a.shareNumber <= 7) {
+        allocated.add(`${a.cowNumber}:${a.shareNumber}`);
+      }
+    }
+    for (const d of booking.shareParticipantDetails || []) {
+      const cow = d.cowNumber;
+      if (!cowMap[cow]) cowMap[cow] = {};
+      const s = d.shareNumber;
+      if (s >= 1 && s <= 7) {
+        cowMap[cow][s] = {
+          shareNumber: s,
+          name: d.name || '',
+          contact: d.contact || '',
+          address: d.address || '',
+          paymentReceived: d.paymentReceived || false,
+          allocated: true
+        };
+      }
+    }
+  }
+  const maxCow = Object.keys(cowMap).length
+    ? Math.max(...Object.keys(cowMap).map(Number))
+    : 0;
+  const animals = {};
+  for (let c = 1; c <= maxCow; c++) {
+    animals[c] = [];
+    for (let s = 1; s <= 7; s++) {
+      const existing = cowMap[c]?.[s];
+      if (existing) {
+        existing.allocated = existing.allocated || allocated.has(`${c}:${s}`);
+        animals[c].push(existing);
+      } else {
+        animals[c].push({
+          shareNumber: s, name: '', contact: '', address: '',
+          paymentReceived: false, allocated: allocated.has(`${c}:${s}`)
+        });
+      }
+    }
+  }
+  return { maxCow, animals };
+}
+
+function buildSummaryRows(animals, maxCow) {
+  const rows = [['PENDING SHARES & AMOUNT SUMMARY'], []];
+  for (let start = 1; start <= maxCow; start += 5) {
+    const end = Math.min(start + 4, maxCow);
+    const hdr = [], psr = [], par = [];
+    for (let c = start; c <= end; c++) {
+      const off = (c - start) * 3;
+      while (hdr.length < off) hdr.push('');
+      while (psr.length < off) psr.push('');
+      while (par.length < off) par.push('');
+      hdr.push(`ANIMAL # ${c}`);
+      const shares = animals[c] || [];
+      psr.push('Pending Share #', shares.filter((s) => !s.allocated).length);
+      par.push('Pending Amount #', shares.filter((s) => !s.paymentReceived).length);
+    }
+    rows.push(hdr, psr, par, [], []);
+  }
+  return rows;
+}
+
+function buildDetailRows(animals, maxCow) {
+  const year = new Date().getFullYear();
+  const rows = [
+    ['', 'DAWATEISLAMI  IJTAMAI  QURBANI'],
+    ['', `I-9/4, ISLAMABAD ${year}`],
+    []
+  ];
+  const header = [
+    'ANIMAL', 'SHARE', 'NAME', 'SURNAME', 'ADDRESS',
+    'DATE', 'RECEIPT', 'CONTACT #', 'AMOUNT', 'BALANCE',
+    '', 'BONES', 'MEAT', 'TOTAL'
+  ];
+  for (let c = 1; c <= maxCow; c++) {
+    rows.push([]);
+    rows.push(header);
+    const shares = animals[c] || [];
+    for (let s = 0; s < 7; s++) {
+      const sh = shares[s] || {};
+      rows.push([
+        c, s + 1, sh.name || '', '', sh.address || '',
+        '', '', sh.contact || '', '', '',
+        '', '', '', ''
+      ]);
+    }
+    rows.push([
+      '', '', '', '', '', '', '',
+      shares.filter((s) => !s.contact).length,
+      shares.filter((s) => !s.paymentReceived).length,
+      '', '', '', '', ''
+    ]);
+  }
+  return rows;
+}
+
+function buildSharesRows(animals, maxCow) {
+  const rows = [];
+  for (let start = 1; start <= maxCow; start += 3) {
+    const end = Math.min(start + 2, maxCow);
+    const hdr = [], sub = [];
+    for (let c = start; c <= end; c++) {
+      const off = (c - start) * 3;
+      while (hdr.length < off) hdr.push('');
+      while (sub.length < off) sub.push('');
+      hdr.push(`ANIMAL # ${c}`);
+      sub.push('SHARE #', 'NAME');
+    }
+    rows.push(hdr, sub);
+    for (let s = 0; s < 7; s++) {
+      const dr = [];
+      for (let c = start; c <= end; c++) {
+        const off = (c - start) * 3;
+        while (dr.length < off) dr.push('');
+        const sh = (animals[c] || [])[s] || {};
+        dr.push(s + 1, sh.name || '');
+      }
+      rows.push(dr);
+    }
+    rows.push([], []);
+  }
+  return rows;
+}
+
+function buildExpensesRows(maxCow) {
+  const rows = [
+    ['COST', 'TOTAL', 'PER ANIMAL'],
+    ['MEAT COST'], ['FODDER COST'], ['MISCELLANEOUS']
+  ];
+  const hdr = [
+    'ANIMAL PRICE', 'MEAT COST', 'FOOD COST', 'MISCELLANEOUS',
+    'ANIMAL SPECIFIC', 'TOTAL', 'PER SHARE', 'RECEIVED', 'BALANCE'
+  ];
+  for (let c = 1; c <= maxCow; c++) {
+    rows.push([`ANIMAL # ${c}`], hdr, new Array(9).fill(''));
+  }
+  return rows;
+}
+
+function setColumnWidths(ws, data) {
+  const widths = [];
+  for (const row of data) {
+    for (let i = 0; i < row.length; i++) {
+      const len = Math.min(Math.max(String(row[i] ?? '').length + 2, 8), 35);
+      if (!widths[i] || widths[i] < len) widths[i] = len;
+    }
+  }
+  ws['!cols'] = widths.map((w) => ({ wch: w }));
+}
+
+function addSheet(wb, name, data) {
+  const ws = XLSX.utils.aoa_to_sheet(data);
+  setColumnWidths(ws, data);
+  XLSX.utils.book_append_sheet(wb, ws, name);
+}
+
+export async function exportData(_req, res) {
+  try {
+    const allBookings = await Booking.find({})
+      .select('cowShareAssignments shareParticipantDetails')
+      .lean();
+    const { maxCow, animals } = aggregateAnimalData(allBookings);
+    if (maxCow < 1) {
+      return res.status(400).json({ error: 'No animal data to export' });
+    }
+
+    const wb = XLSX.utils.book_new();
+    addSheet(wb, 'Summary', buildSummaryRows(animals, maxCow));
+    addSheet(wb, 'Detail', buildDetailRows(animals, maxCow));
+    addSheet(wb, 'Shares', buildSharesRows(animals, maxCow));
+    addSheet(wb, 'Expenses', buildExpensesRows(maxCow));
+
+    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const year = new Date().getFullYear();
+    const fileName = `${year} Ijtamai Qurbani I-9-4.xlsx`;
+
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.send(Buffer.from(buf));
+  } catch (err) {
+    console.error('Export error:', err);
+    res.status(500).json({ error: 'Could not generate export file' });
+  }
 }
 
 export async function createBooking(req, res) {
