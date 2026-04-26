@@ -587,6 +587,7 @@ function buildSummaryRows(animals, maxCow) {
 
 function buildDetailRows(animals, maxCow) {
   const year = new Date().getFullYear();
+  const perSharePrice = Number(process.env.PER_SHARE_PRICE) || '';
   const rows = [
     ['', 'DAWATEISLAMI  IJTAMAI  QURBANI'],
     ['', `I-9/4, ISLAMABAD ${year}`],
@@ -603,9 +604,10 @@ function buildDetailRows(animals, maxCow) {
     const shares = animals[c] || [];
     for (let s = 0; s < 7; s++) {
       const sh = shares[s] || {};
+      const amount = sh.paymentReceived ? perSharePrice : '';
       rows.push([
         c, s + 1, sh.name || '', '', sh.address || '',
-        '', '', sh.contact || '', '', '',
+        '', '', sh.contact || '', amount, '',
         '', '', '', ''
       ]);
     }
